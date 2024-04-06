@@ -30,6 +30,16 @@ struct Random {
     }
 };
 
+inline uint32_t ablend(uint32_t col, uint8_t alpha) {
+	uint64_t v = 
+		(((col & 0xff0000ULL) << 16) |
+		((col & 0xff00ULL) << 8) |
+		col & 0xffULL) * alpha;
+	return ((v >> 24) & 0xff0000) |
+		((v >> 16) & 0xff00) |
+		((v >> 8) & 0xff);
+}
+
 float min(float a, float b) { return a < b ? a : b; }
 
 float boxTest(const Vec &pos, const Vec &mins, const Vec &maxs) {
@@ -145,7 +155,11 @@ Vec tracePath(Random &r, Vec origin, Vec direction, int bounceCount = 3) {
             if (hitType == HIT_WHITE)
                 attenuation = attenuation * 0.3f;//0.2;
             else if (hitType == HIT_RED)
+#ifdef RED_BLUE_SWAP
+                attenuation = attenuation * Vec(0.01f, 0.01f, 0.2f);
+#else
                 attenuation = attenuation * Vec(0.2f, 0.01f, 0.01f);
+#endif
             else if (hitType == HIT_GREEN)
                 attenuation = attenuation * Vec(0.01f, 0.2f, 0.01f);
         }
@@ -160,10 +174,18 @@ Vec tracePath(Random &r, Vec origin, Vec direction, int bounceCount = 3) {
             direction = direction + Vec(r.randomVal()*0.2f-0.1f, r.randomVal()*0.2f-0.1f, r.randomVal()*0.2f-0.1f);
             direction.normalize();
             const float base = 0.8f;
+#ifdef RED_BLUE_SWAP
+            attenuation = attenuation * Vec(0.16f*base, 0.72f*base, 0.98f*base);
+#else
             attenuation = attenuation * Vec(0.98f*base, 0.72f*base, 0.16f*base);
+#endif
         }
         if (hitType == HIT_LIGHT) {
+#ifdef RED_BLUE_SWAP
+            color = color + attenuation * Vec(100, 80, 50);
+#else
             color = color + attenuation * Vec(50, 80, 100);
+#endif
             break;
         }
     }
@@ -364,45 +386,41 @@ public:
           SDL_Color col = { 255, 255, 255 };
           lastText = TTF_RenderText_Blended(font, diagnosticLine, col);
           SDL_LockSurface(lastText);
-          uint8_t *pixel = reinterpret_cast<uint8_t*>(lastText->pixels);
+          uint32_t *pixel = reinterpret_cast<uint32_t*>(lastText->pixels);
           const int w = lastText->w;
           const int h = lastText->h;
-          const int p = lastText->pitch;
-          const int pc = p - w * 4;
+          const int p = lastText->pitch >> 2;
+          const int pc = -p - w;
+          // shadow is the shadow source, the last line cannot cast a shadow
+          uint32_t *shadow = pixel + p * (h - 2);
+          for (int j = h-1; j--;) {
+            for (int i = w; i--;) {
+              uint32_t *dst = shadow + p;
+              uint8_t da = *dst >> 24;
+              if (da < 255) {
+                uint32_t src = *shadow;
+                uint8_t sa = src >> 24;
+                uint8_t srcAlpha = (sa * (255 - da)) >> 8;
+                uint8_t dstAlpha = da;
+                *dst = ablend(*dst, dstAlpha) | ((srcAlpha + dstAlpha) << 24);
+              }
+              ++shadow;
+            }
+            shadow += pc;
+          }
 #ifdef FLIP_SCREEN
           for (int y = h >> 1; y--;) {
-            uint8_t *src = pixel + y * p;
-            uint8_t *dst = pixel + (h - y) * p;
+            uint32_t *src = pixel + y * p;
+            uint32_t *dst = pixel + (h - y) * p;
             for (int x = w; x--;) {
-              dst -= 4;
-              int r = src[0], g = src[1], b = src[2], a = src[3];
-              src[0] = dst[0];
-              src[1] = dst[1];
-              src[2] = dst[2];
-              src[3] = dst[3];
-              dst[0] = r;
-              dst[1] = g;
-              dst[2] = b;
-              dst[3] = a;
-              src += 4;
+              --dst;
+              uint32_t s = *src;
+              *src = *dst;
+              *dst = s;
+              ++src;
             }
           }
 #endif
-          for (int j = h-1; j--;) {
-            for (int i = w; i--;) {
-              uint8_t *src = pixel + p;
-              uint8_t a = src[3];
-              if (i > 0 && pixel[7] > src[3]) a = pixel[7];
-              if (a > pixel[3]) {
-                pixel[0] = 0;
-                pixel[1] = 0;
-                pixel[2] = 0;
-                pixel[3] = a;
-              }
-              pixel += 4;
-            }
-            pixel += pc;
-          }
           SDL_UnlockSurface(lastText);
         }
         SDL_BlitSurface(lastText, nullptr, screen, nullptr);
@@ -467,25 +485,32 @@ int main() {
   const int passedHeight = renderer.getHeight() * passes;
   bool quit = false;
   char info[1024];
+  int linesLeft = 1;
   for (int pass = passes; pass--;) {
-    int passBase = renderer.getHeight() * (passes - pass + 1);
+    int passBase = renderer.getHeight() * (passes - pass - 1);
     for (int y=renderer.getHeight(); y--;) {
-      int current = time(NULL);
-      bool present = y < renderer.getHeight() && current > last || y == 0;
+      --linesLeft;
+      bool present = linesLeft <= 0 || y == 0;
       if (present) {
+        linesLeft = 64;
+        int current = time(NULL);
         int overall = current - start;
 
         int progress = passBase + (renderer.getHeight() - y);
         int remaining = passedHeight - progress;
         int left = (float) overall * remaining / progress;
         int expected = (float) overall * passedHeight / progress;
+        if (left <= 0) {
+          left = 0;
+          expected = overall;
+        }
 
-        snprintf(info, sizeof(info), "\r%6.2f%% %3d:%02d:%02d %3d:%02d:%02d %3d:%02d:%02d",
+        snprintf(info, sizeof(info), "%6.2f%% %3d:%02d:%02d %3d:%02d:%02d %3d:%02d:%02d",
                 progress*100.0f/passedHeight,
                 overall / 3600, overall / 60 % 60, overall % 60,
                 left / 3600, left / 60 % 60, left % 60,
                 expected / 3600, expected / 60 % 60, expected % 60);
-        fprintf(stderr, "%s", info);
+        fprintf(stderr, "\r%s %d %d (%d)", info, progress, passedHeight, passBase);
         last = current;
         renderer.setDiagnosticLine(info);
       }

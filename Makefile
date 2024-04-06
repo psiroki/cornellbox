@@ -42,7 +42,7 @@ miyoo: build/miyoo/cornellbox build/miyoo/assets build/miyoo/config.json
 
 build/rg35xx/cornellbox: $(MAIN_OBJ) $(OBJS)
 	mkdir -p build/rg35xx
-	$(CC) -DBASIC_VECTORS -DBASIC_RENDERER -O3 $(MAIN_OBJ) $(OBJS) $(LINKER_FLAGS) \
+	$(CC) -DRED_BLUE_SWAP -DBASIC_VECTORS -DBASIC_RENDERER -O3 $(MAIN_OBJ) $(OBJS) $(LINKER_FLAGS) \
 		-march=armv7-a -mfloat-abi=softfp \
 		-funsafe-math-optimizations -mfpu=neon \
 		-fopt-info-vec-optimized \
