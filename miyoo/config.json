@@ -1,0 +1,6 @@
+{
+	"label":	"Cornellbox",
+	"icon":	"assets/icon.png",
+	"launch":	"cornellbox",
+	"description":	"Cornellbox scene renderer"
+}
