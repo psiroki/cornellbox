@@ -225,6 +225,7 @@ class Renderer {
     SDL_Surface *rendered;
     SDL_Surface *overlay;
     SDL_Surface *lastText;
+    SDL_Joystick *joystick;
     TTF_Font *font;
     const char *diagnosticLine;
 
@@ -277,7 +278,9 @@ public:
         ipOffsetMultiplier(focalLength / (18.0f * 2.0f) / aperture),
         diagnosticLine(nullptr),
         lastText(nullptr) {
-        SDL_Init(SDL_INIT_VIDEO);
+        SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK);
+        SDL_JoystickEventState(SDL_ENABLE);
+        joystick = SDL_JoystickOpen(0);
         SDL_ShowCursor(0);
         screen = SDL_SetVideoMode(w, h, 32, 0);
         rendered = SDL_CreateRGBSurface(0, w, h, 32,
@@ -315,6 +318,10 @@ public:
         delete[] row;
         delete[] samples;
         row = 0;
+        if (joystick) {
+            SDL_JoystickClose(joystick);
+            joystick = nullptr;
+        }
         SDL_Quit();
     }
 
@@ -458,13 +465,19 @@ void* ThreadLocals::renderThread() {
 
 bool shouldQuit() {
   static SDLKey lastKey;
+  static Uint8 lastButton = ~0;
   SDL_Event event;
   while (SDL_PollEvent(&event)) {
     if (event.type == SDL_KEYUP) {
       lastKey = event.key.keysym.sym;
       std::cerr << "Key: " << SDL_GetKeyName(lastKey) << std::endl;
     }
+    if (event.type == SDL_JOYBUTTONUP) {
+      lastButton = event.jbutton.button;
+      std::cerr << "Button: " << event.jbutton.button << std::endl;
+    }
     if (event.type == SDL_QUIT ||
+        event.type == SDL_JOYBUTTONDOWN && event.jbutton.button == lastButton ||
         event.type == SDL_KEYDOWN &&
             (event.key.keysym.sym == SDLK_ESCAPE || event.key.keysym.sym == lastKey)) {
       return true;

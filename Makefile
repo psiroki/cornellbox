@@ -4,7 +4,7 @@ TEST_OBJS:=$(wildcard test/*.cc)
 
 CC?=$(if $(CROSS_COMPILE),$(CROSS_COMPILE)gcc,clang++)
 
-COMPILER_FLAGS=-std=c++17 -I/usr/include/SDL
+COMPILER_FLAGS=-std=c++17
 TEST_COMPILER_FLAGS=-g -DTEST
 LIVE_COMPILER_FLAGS=-O3
 
