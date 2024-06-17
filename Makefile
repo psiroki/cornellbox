@@ -17,6 +17,7 @@ TEST_OBJ_NAME=build/cornellbox_test
 .PHONY: miyoo
 .PHONY: rg35xx
 .PHONY: rg35xxhf
+.PHONY: arm64
 .PHONY: test
 .PHONY: run
 
@@ -61,9 +62,21 @@ build/rg35xxhf/cornellbox: $(MAIN_OBJ) $(OBJS)
 build/rg35xxhf/assets: assets
 	cp -ru assets build/rg35xxhf/
 
+build/arm64/cornellbox: $(MAIN_OBJ) $(OBJS)
+	mkdir -p build/arm64
+	$(CC) -DBASIC_VECTORS -DBASIC_RENDERER -O3 $(MAIN_OBJ) $(OBJS) $(LINKER_FLAGS) \
+		-funsafe-math-optimizations \
+		-fopt-info-vec-optimized \
+		$(COMPILER_FLAGS) $(LIVE_COMPILER_FLAGS) --output build/arm64/cornellbox
+
+build/arm64/assets: assets
+	cp -ru assets build/arm64/
+
 rg35xx: build/rg35xx/cornellbox build/rg35xx/assets
 
 rg35xxhf: build/rg35xxhf/cornellbox build/rg35xxhf/assets
+
+arm64: build/arm64/cornellbox build/arm64/assets
 
 $(TEST_OBJ_NAME): $(TEST_OBJS) $(OBJS)
 	mkdir -p build

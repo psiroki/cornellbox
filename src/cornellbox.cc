@@ -6,6 +6,9 @@
 #include <semaphore.h>
 #include <pthread.h>
 #include <iostream>
+#ifdef __linux__
+#include <unistd.h>
+#endif
 
 #include <SDL/SDL.h>
 #include <SDL/SDL_ttf.h>
@@ -156,9 +159,9 @@ Vec tracePath(Random &r, Vec origin, Vec direction, int bounceCount = 3) {
                 attenuation = attenuation * 0.3f;//0.2;
             else if (hitType == HIT_RED)
 #ifdef RED_BLUE_SWAP
-                attenuation = attenuation * Vec(0.01f, 0.01f, 0.2f);
-#else
                 attenuation = attenuation * Vec(0.2f, 0.01f, 0.01f);
+#else
+                attenuation = attenuation * Vec(0.01f, 0.01f, 0.2f);
 #endif
             else if (hitType == HIT_GREEN)
                 attenuation = attenuation * Vec(0.01f, 0.2f, 0.01f);
@@ -175,16 +178,16 @@ Vec tracePath(Random &r, Vec origin, Vec direction, int bounceCount = 3) {
             direction.normalize();
             const float base = 0.8f;
 #ifdef RED_BLUE_SWAP
-            attenuation = attenuation * Vec(0.16f*base, 0.72f*base, 0.98f*base);
-#else
             attenuation = attenuation * Vec(0.98f*base, 0.72f*base, 0.16f*base);
+#else
+            attenuation = attenuation * Vec(0.16f*base, 0.72f*base, 0.98f*base);
 #endif
         }
         if (hitType == HIT_LIGHT) {
 #ifdef RED_BLUE_SWAP
-            color = color + attenuation * Vec(100, 80, 50);
-#else
             color = color + attenuation * Vec(50, 80, 100);
+#else
+            color = color + attenuation * Vec(100, 80, 50);
 #endif
             break;
         }
@@ -210,8 +213,224 @@ void* renderThread(void *localsPtr) {
     return static_cast<ThreadLocals*>(localsPtr)->renderThread();
 }
 
+
+class Visualizer {
+  int w, h;
+  SDL_Surface *screen;
+  SDL_Surface *rendered;
+  SDL_Surface *overlay;
+  SDL_Surface *lastText;
+  SDL_Joystick *joystick;
+  TTF_Font *font;
+  const char *diagnosticLine;
+public:
+  Visualizer(int w, int h):
+    w(w), h(h),
+    diagnosticLine(nullptr),
+    lastText(nullptr) {
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK);
+    SDL_JoystickEventState(SDL_ENABLE);
+    joystick = SDL_JoystickOpen(0);
+    SDL_ShowCursor(0);
+    screen = SDL_SetVideoMode(w, h, 32, 0);
+    rendered = SDL_CreateRGBSurface(0, w, h, 32,
+        screen->format->Rmask,
+        screen->format->Gmask,
+        screen->format->Bmask,
+        screen->format->Amask);
+    TTF_Init();
+    font = TTF_OpenFont("assets/RobotoMono-Regular.ttf", 25);
+  }
+
+  ~Visualizer() {
+    if (lastText) {
+      SDL_FreeSurface(lastText);
+      lastText = nullptr;
+    }
+    if (rendered) {
+      SDL_FreeSurface(rendered);
+      rendered = nullptr;
+    }
+    TTF_CloseFont(font);
+    font = nullptr;
+    if (joystick) {
+      SDL_JoystickClose(joystick);
+      joystick = nullptr;
+    }
+    SDL_Quit();
+  }
+
+  inline int getWidth() const {
+    return w;
+  }
+
+  inline int getHeight() const {
+    return h;
+  }
+
+  void setDiagnosticLine(const char *str) {
+    diagnosticLine = str;
+    if (lastText) {
+      SDL_FreeSurface(lastText);
+      lastText = nullptr;
+    }
+  }
+
+  void drawRow(int y, uint8_t *row) {
+    if (!SDL_LockSurface(rendered)) {
+#ifdef FLIP_SCREEN
+      int targetY = y;
+#else
+      int targetY = (h - y - 1);
+#endif
+      uint8_t *target = reinterpret_cast<uint8_t*>(rendered->pixels) + targetY * w*4;
+      uint8_t *source = row;
+#ifdef FLIP_SCREEN
+      target += w * 4;
+#endif          
+      for (int i = 0; i < w; ++i) {
+#ifdef FLIP_SCREEN
+        target -= 4;
+#endif          
+        target[0] = source[0];
+        target[1] = source[1];
+        target[2] = source[2];
+        target[3] = source[3];
+#ifndef FLIP_SCREEN
+        target += 4;
+#endif
+        source += 4;
+      }
+      SDL_UnlockSurface(rendered);
+    }
+  }
+
+  void present() {
+    SDL_BlitSurface(rendered, nullptr, screen, nullptr);
+    if (diagnosticLine) {
+      if (!lastText) {
+        SDL_Color col = { 255, 255, 255 };
+        lastText = TTF_RenderText_Blended(font, diagnosticLine, col);
+        SDL_LockSurface(lastText);
+        uint32_t *pixel = reinterpret_cast<uint32_t*>(lastText->pixels);
+        const int w = lastText->w;
+        const int h = lastText->h;
+        const int p = lastText->pitch >> 2;
+        const int pc = -p - w;
+        // shadow is the shadow source, the last line cannot cast a shadow
+        uint32_t *shadow = pixel + p * (h - 2);
+        for (int j = h-1; j--;) {
+          for (int i = w; i--;) {
+            uint32_t *dst = shadow + p;
+            uint8_t da = *dst >> 24;
+            if (da < 255) {
+              uint32_t src = *shadow;
+              uint8_t sa = src >> 24;
+              uint8_t srcAlpha = (sa * (255 - da)) >> 8;
+              uint8_t dstAlpha = da;
+              *dst = ablend(*dst, dstAlpha) | ((srcAlpha + dstAlpha) << 24);
+            }
+            ++shadow;
+          }
+          shadow += pc;
+        }
+#ifdef FLIP_SCREEN
+        for (int y = h >> 1; y--;) {
+          uint32_t *src = pixel + y * p;
+          uint32_t *dst = pixel + (h - y) * p;
+          for (int x = w; x--;) {
+            --dst;
+            uint32_t s = *src;
+            *src = *dst;
+            *dst = s;
+            ++src;
+          }
+        }
+#endif
+        SDL_UnlockSurface(lastText);
+      }
+      SDL_BlitSurface(lastText, nullptr, screen, nullptr);
+    }
+    SDL_Flip(screen);
+  }
+
+  bool promptLongPress(const char *q) {
+    setDiagnosticLine(q);
+    bool keys[static_cast<int>(SDLK_LAST)], buttons[256];
+    memset(keys, 0, sizeof(keys));
+    memset(buttons, 0, sizeof(buttons));
+    int currentlyDown = 0;
+    bool pressed = false;
+    bool result = false;
+    while (!pressed || currentlyDown > 0) {
+      present();
+      SDL_Event event;
+      bool firstEvent = true;
+      while (firstEvent && SDL_WaitEvent(&event) || !firstEvent && SDL_PollEvent(&event)) {
+        firstEvent = false;
+        bool downIncreased = false;
+        if (event.type == SDL_KEYDOWN) {
+          pressed = true;
+          int index = static_cast<int>(event.key.keysym.sym);
+          if (!keys[index]) {
+            keys[index] = true;
+            ++currentlyDown;
+            downIncreased = true;
+          }
+        } else if (event.type == SDL_KEYUP) {
+          int index = static_cast<int>(event.key.keysym.sym);
+          if (keys[index]) {
+            keys[index] = false;
+            --currentlyDown;
+          }
+        }
+        if (event.type == SDL_JOYBUTTONDOWN) {
+          Uint8 index = event.jbutton.button;
+          if (!buttons[index]) {
+            buttons[index] = true;
+            ++currentlyDown;
+            downIncreased = true;
+          }
+        } else if (event.type == SDL_JOYBUTTONUP) {
+          Uint8 index = event.jbutton.button;
+          if (buttons[index]) {
+            buttons[index] = false;
+            --currentlyDown;
+          }
+        }
+        if (downIncreased && currentlyDown >= 2) result = !result;
+      }
+      if (pressed) {
+        SDL_Rect grayRect = {
+          .x = static_cast<Sint16>(!result ? rendered->w >> 1 : 0),
+          .y = 0,
+          .w = static_cast<Uint16>(rendered->w >> 1),
+          .h = static_cast<Uint16>(rendered->h),
+        };
+        SDL_FillRect(rendered, &grayRect, 0xff404040U);
+        SDL_Rect blackRect = {
+          .x = static_cast<Sint16>(result ? rendered->w >> 1 : 0),
+          .y = 0,
+          .w = static_cast<Uint16>(rendered->w >> 1),
+          .h = static_cast<Uint16>(rendered->h),
+        };
+        SDL_FillRect(rendered, &blackRect, 0xff000000U);
+      }
+    }
+    SDL_Rect blackRect = {
+      .x = 0,
+      .y = 0,
+      .w = static_cast<Uint16>(rendered->w),
+      .h = static_cast<Uint16>(rendered->h),
+    };
+    SDL_FillRect(rendered, &blackRect, 0xff000000U);
+    return result;
+  }
+};
+
 class Renderer {
-    static const int numThreads = 2;
+    friend Visualizer;
+    static const int maxNumThreads = 64;
     friend ThreadLocals;
     const int w, h, samplesCount;
     Vec camera, right, up, forward;
@@ -219,18 +438,13 @@ class Renderer {
     float *samples;
     int x, y;
     float focalLength, aperture, focusDistance, imageDistance, ipOffsetMultiplier;
+    int numThreads;
     Random commonRandom;
-    ThreadLocals threads[numThreads];
-    SDL_Surface *screen;
-    SDL_Surface *rendered;
-    SDL_Surface *overlay;
-    SDL_Surface *lastText;
-    SDL_Joystick *joystick;
-    TTF_Font *font;
-    const char *diagnosticLine;
+    ThreadLocals threads[maxNumThreads];
+    Visualizer &v;
 
     void renderPixel(Random &r, int x, int y, int numSamples) {
-        uint8_t *c = row + (w - 1 - x)*3;
+        uint8_t *c = row + (w - 1 - x)*4;
         Vec color = Vec(0.0f);
         for (int i = numSamples; --i;) {
             // this is the subpixel we are calculating
@@ -262,34 +476,24 @@ class Renderer {
         *c++ = (int) color.x();
         *c++ = (int) color.y();
         *c++ = (int) color.z();
+        *c++ = 255;
     }
 public:
-    Renderer(int w, int h, int samplesCount) : w(w), h(h), samplesCount(samplesCount),
+    Renderer(Visualizer &v, int samplesCount, int numThreads) : v(v),
+        w(v.getWidth()), h(v.getHeight()),
+        samplesCount(samplesCount),
+        numThreads(numThreads),
         camera(0.0f, 0.0f, -10.8f),
         right((float) w / h, 0.0f),
         up(0.0f, 1.0f),
         forward(0.0, 0.0, 1.0),
-        row(new uint8_t[w*3]),
+        row(new uint8_t[w*4]),
         samples(new float[w*h*4]),
         focalLength(36.0f / (2.0f * right.x())),
         aperture(1.2f),
         focusDistance(15.8f),
         imageDistance(1.0f),
-        ipOffsetMultiplier(focalLength / (18.0f * 2.0f) / aperture),
-        diagnosticLine(nullptr),
-        lastText(nullptr) {
-        SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK);
-        SDL_JoystickEventState(SDL_ENABLE);
-        joystick = SDL_JoystickOpen(0);
-        SDL_ShowCursor(0);
-        screen = SDL_SetVideoMode(w, h, 32, 0);
-        rendered = SDL_CreateRGBSurface(0, w, h, 32,
-            screen->format->Rmask,
-            screen->format->Gmask,
-            screen->format->Bmask,
-            screen->format->Amask);
-        TTF_Init();
-        font = TTF_OpenFont("assets/RobotoMono-Regular.ttf", 25);
+        ipOffsetMultiplier(focalLength / (18.0f * 2.0f) / aperture) {
         commonRandom.seed = static_cast<int64_t>(clock());
         for (int i = numThreads; i--; ) {
             ThreadLocals &t(threads[i]);
@@ -305,32 +509,10 @@ public:
     }
 
     ~Renderer() {
-        if (lastText) {
-          SDL_FreeSurface(lastText);
-          lastText = nullptr;
-        }
-        if (rendered) {
-          SDL_FreeSurface(rendered);
-          rendered = nullptr;
-        }
-        TTF_CloseFont(font);
-        font = nullptr;
         delete[] row;
         delete[] samples;
-        row = 0;
-        if (joystick) {
-            SDL_JoystickClose(joystick);
-            joystick = nullptr;
-        }
-        SDL_Quit();
-    }
-
-    void setDiagnosticLine(const char *str) {
-      diagnosticLine = str;
-      if (lastText) {
-        SDL_FreeSurface(lastText);
-        lastText = nullptr;
-      }
+        row = nullptr;
+        samples = nullptr;
     }
 
     void dumpParameters() {
@@ -357,82 +539,12 @@ public:
             ThreadLocals &t(threads[i]);
             if (!t.sync) sem_wait(&t.ready);
         }
-        if (!SDL_LockSurface(rendered)) {
-#ifdef FLIP_SCREEN
-          int targetY = y;
-#else
-          int targetY = (h - y - 1);
-#endif
-          uint8_t *target = reinterpret_cast<uint8_t*>(rendered->pixels) + targetY * w*4;
-          uint8_t *source = row;
-#ifdef FLIP_SCREEN
-          target += w * 4;
-#endif          
-          for (int i = 0; i < w; ++i) {
-#ifdef FLIP_SCREEN
-            target -= 4;
-#endif          
-            target[3] = 255;
-            target[2] = source[0];
-            target[1] = source[1];
-            target[0] = source[2];
-#ifndef FLIP_SCREEN
-            target += 4;
-#endif
-            source += 3;
-          }
-          SDL_UnlockSurface(rendered);
-        }
+        v.drawRow(y, row);
         return row;
     }
 
     inline void present() {
-      SDL_BlitSurface(rendered, nullptr, screen, nullptr);
-      if (diagnosticLine) {
-        if (!lastText) {
-          SDL_Color col = { 255, 255, 255 };
-          lastText = TTF_RenderText_Blended(font, diagnosticLine, col);
-          SDL_LockSurface(lastText);
-          uint32_t *pixel = reinterpret_cast<uint32_t*>(lastText->pixels);
-          const int w = lastText->w;
-          const int h = lastText->h;
-          const int p = lastText->pitch >> 2;
-          const int pc = -p - w;
-          // shadow is the shadow source, the last line cannot cast a shadow
-          uint32_t *shadow = pixel + p * (h - 2);
-          for (int j = h-1; j--;) {
-            for (int i = w; i--;) {
-              uint32_t *dst = shadow + p;
-              uint8_t da = *dst >> 24;
-              if (da < 255) {
-                uint32_t src = *shadow;
-                uint8_t sa = src >> 24;
-                uint8_t srcAlpha = (sa * (255 - da)) >> 8;
-                uint8_t dstAlpha = da;
-                *dst = ablend(*dst, dstAlpha) | ((srcAlpha + dstAlpha) << 24);
-              }
-              ++shadow;
-            }
-            shadow += pc;
-          }
-#ifdef FLIP_SCREEN
-          for (int y = h >> 1; y--;) {
-            uint32_t *src = pixel + y * p;
-            uint32_t *dst = pixel + (h - y) * p;
-            for (int x = w; x--;) {
-              --dst;
-              uint32_t s = *src;
-              *src = *dst;
-              *dst = s;
-              ++src;
-            }
-          }
-#endif
-          SDL_UnlockSurface(lastText);
-        }
-        SDL_BlitSurface(lastText, nullptr, screen, nullptr);
-      }
-      SDL_Flip(screen);
+      v.present();
     }
 
     inline int getWidth() {
@@ -490,7 +602,17 @@ int main() {
   const int samplesOverall = 1024;
   const int samplesPerPass = 4;
   const int passes = samplesOverall / samplesPerPass;
-  Renderer renderer(640, 480, samplesPerPass);
+  Visualizer visualizer(640, 480);
+  int numThreads = 2;
+  int numCpus = -1;
+#ifdef __linux__
+  numCpus = sysconf(_SC_NPROCESSORS_ONLN);
+  if (numCpus > 0) numThreads = numCpus;
+  if (visualizer.promptLongPress(" A+B: single core     just A: multicore")) {
+    numThreads = 1;
+  }
+#endif
+  Renderer renderer(visualizer, samplesPerPass, numThreads);
   renderer.dumpParameters();
   printf("P6 %d %d 255 ", renderer.getWidth(), renderer.getHeight());
   int last = time(NULL);
@@ -518,14 +640,14 @@ int main() {
           expected = overall;
         }
 
-        snprintf(info, sizeof(info), "%6.2f%% %3d:%02d:%02d %3d:%02d:%02d %3d:%02d:%02d",
+        snprintf(info, sizeof(info), "%6.2f%% %3d:%02d:%02d %3d:%02d:%02d %3d:%02d:%02d (%d)",
                 progress*100.0f/passedHeight,
                 overall / 3600, overall / 60 % 60, overall % 60,
                 left / 3600, left / 60 % 60, left % 60,
-                expected / 3600, expected / 60 % 60, expected % 60);
+                expected / 3600, expected / 60 % 60, expected % 60, numThreads);
         fprintf(stderr, "\r%s %d %d (%d)", info, progress, passedHeight, passBase);
         last = current;
-        renderer.setDiagnosticLine(info);
+        visualizer.setDiagnosticLine(info);
       }
       uint8_t *c = renderer.renderRow(y);
       if (present) renderer.present();
