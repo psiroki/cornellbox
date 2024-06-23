@@ -349,7 +349,15 @@ public:
 #endif
         SDL_UnlockSurface(lastText);
       }
+#ifdef FLIP_SCREEN
+      SDL_Rect textPosition {
+        .x = static_cast<Sint16>(screen->w - lastText->w),
+        .y = static_cast<Sint16>(screen->w - lastText->w),
+      };
+      SDL_BlitSurface(lastText, nullptr, screen, &textPosition);
+#else
       SDL_BlitSurface(lastText, nullptr, screen, nullptr);
+#endif
     }
     SDL_Flip(screen);
   }
@@ -385,7 +393,9 @@ public:
           }
         }
         if (event.type == SDL_JOYBUTTONDOWN) {
+          pressed = true;
           Uint8 index = event.jbutton.button;
+          std::cerr << "Down " << (int) index << std::endl;
           if (!buttons[index]) {
             buttons[index] = true;
             ++currentlyDown;
@@ -393,6 +403,7 @@ public:
           }
         } else if (event.type == SDL_JOYBUTTONUP) {
           Uint8 index = event.jbutton.button;
+          std::cerr << "Up " << (int) index << std::endl;
           if (buttons[index]) {
             buttons[index] = false;
             --currentlyDown;
@@ -401,15 +412,20 @@ public:
         if (downIncreased && currentlyDown >= 2) result = !result;
       }
       if (pressed) {
+#ifdef FLIP_SCREEN
+        bool grayOnRight = result;
+#else
+        bool grayOnRight = !result;
+#endif
         SDL_Rect grayRect = {
-          .x = static_cast<Sint16>(!result ? rendered->w >> 1 : 0),
+          .x = static_cast<Sint16>(grayOnRight ? rendered->w >> 1 : 0),
           .y = 0,
           .w = static_cast<Uint16>(rendered->w >> 1),
           .h = static_cast<Uint16>(rendered->h),
         };
         SDL_FillRect(rendered, &grayRect, 0xff404040U);
         SDL_Rect blackRect = {
-          .x = static_cast<Sint16>(result ? rendered->w >> 1 : 0),
+          .x = static_cast<Sint16>(!grayOnRight ? rendered->w >> 1 : 0),
           .y = 0,
           .w = static_cast<Uint16>(rendered->w >> 1),
           .h = static_cast<Uint16>(rendered->h),
@@ -608,7 +624,7 @@ int main() {
 #ifdef __linux__
   numCpus = sysconf(_SC_NPROCESSORS_ONLN);
   if (numCpus > 0) numThreads = numCpus;
-  if (visualizer.promptLongPress(" A+B: single core     just A: multicore")) {
+  if (visualizer.promptLongPress(" A+B: single core     just A: multicore ")) {
     numThreads = 1;
   }
 #endif
