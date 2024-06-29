@@ -10,9 +10,7 @@
 #include <unistd.h>
 #endif
 
-#include <SDL/SDL.h>
-#include <SDL/SDL_ttf.h>
-
+#include "sdlcompat.hh"
 #include "platform.hh"
 
 const float TAU = 6.283185307179586f;
@@ -216,10 +214,11 @@ void* renderThread(void *localsPtr) {
 
 class Visualizer {
   int w, h;
-  SDL_Surface *screen;
-  SDL_Surface *rendered;
-  SDL_Surface *overlay;
-  SDL_Surface *lastText;
+  Video *video;
+  VideoSurface *screen;
+  VideoSurface *rendered;
+  VideoSurface *overlay;
+  VideoSurface *lastText;
   SDL_Joystick *joystick;
   TTF_Font *font;
   const char *diagnosticLine;
@@ -232,23 +231,24 @@ public:
     SDL_JoystickEventState(SDL_ENABLE);
     joystick = SDL_JoystickOpen(0);
     SDL_ShowCursor(0);
-    screen = SDL_SetVideoMode(w, h, 32, 0);
-    rendered = SDL_CreateRGBSurface(0, w, h, 32,
-        screen->format->Rmask,
-        screen->format->Gmask,
-        screen->format->Bmask,
-        screen->format->Amask);
+#if defined(USE_SDL2) && defined(PORTRAIT)
+    video = new Video(w, h, 3);
+#else
+    video = new Video(w, h);
+#endif
+    screen = video->getScreen();
+    rendered = video->createSurface(w, h);
     TTF_Init();
     font = TTF_OpenFont("assets/RobotoMono-Regular.ttf", 25);
   }
 
   ~Visualizer() {
     if (lastText) {
-      SDL_FreeSurface(lastText);
+      delete lastText;
       lastText = nullptr;
     }
     if (rendered) {
-      SDL_FreeSurface(rendered);
+      delete rendered;
       rendered = nullptr;
     }
     TTF_CloseFont(font);
@@ -271,19 +271,20 @@ public:
   void setDiagnosticLine(const char *str) {
     diagnosticLine = str;
     if (lastText) {
-      SDL_FreeSurface(lastText);
+      delete lastText;
       lastText = nullptr;
     }
   }
 
   void drawRow(int y, uint8_t *row) {
-    if (!SDL_LockSurface(rendered)) {
+    LockedSurface r;
+    if (!rendered->lock(&r)) {
 #ifdef FLIP_SCREEN
       int targetY = y;
 #else
       int targetY = (h - y - 1);
 #endif
-      uint8_t *target = reinterpret_cast<uint8_t*>(rendered->pixels) + targetY * w*4;
+      uint8_t *target = r.pixels + targetY * w*4;
       uint8_t *source = row;
 #ifdef FLIP_SCREEN
       target += w * 4;
@@ -301,21 +302,22 @@ public:
 #endif
         source += 4;
       }
-      SDL_UnlockSurface(rendered);
+      rendered->unlock();
     }
   }
 
   void present() {
-    SDL_BlitSurface(rendered, nullptr, screen, nullptr);
+    rendered->blitOn(screen, 0, 0);
     if (diagnosticLine) {
       if (!lastText) {
         SDL_Color col = { 255, 255, 255 };
-        lastText = TTF_RenderText_Blended(font, diagnosticLine, col);
-        SDL_LockSurface(lastText);
-        uint32_t *pixel = reinterpret_cast<uint32_t*>(lastText->pixels);
-        const int w = lastText->w;
-        const int h = lastText->h;
-        const int p = lastText->pitch >> 2;
+        lastText = video->drawText(font, diagnosticLine, col);
+        LockedSurface lt;
+        lastText->lock(&lt);
+        uint32_t *pixel = reinterpret_cast<uint32_t*>(lt.pixels);
+        const int w = lt.w;
+        const int h = lt.h;
+        const int p = lt.pitch >> 2;
         const int pc = -p - w;
         // shadow is the shadow source, the last line cannot cast a shadow
         uint32_t *shadow = pixel + p * (h - 2);
@@ -347,24 +349,20 @@ public:
           }
         }
 #endif
-        SDL_UnlockSurface(lastText);
+        lastText->unlock();
       }
 #ifdef FLIP_SCREEN
-      SDL_Rect textPosition {
-        .x = static_cast<Sint16>(screen->w - lastText->w),
-        .y = static_cast<Sint16>(screen->w - lastText->w),
-      };
-      SDL_BlitSurface(lastText, nullptr, screen, &textPosition);
+      lastText->blitOn(screen, screen->getWidth() - lastText->getWidth(), screen->getHeight() - lastText->getHeight());
 #else
-      SDL_BlitSurface(lastText, nullptr, screen, nullptr);
+      lastText->blitOn(screen, 0, 0);
 #endif
     }
-    SDL_Flip(screen);
+    video->present();
   }
 
   bool promptLongPress(const char *q) {
     setDiagnosticLine(q);
-    bool keys[static_cast<int>(SDLK_LAST)], buttons[256];
+    bool keys[NUM_SCANCODES], buttons[256];
     memset(keys, 0, sizeof(keys));
     memset(buttons, 0, sizeof(buttons));
     int currentlyDown = 0;
@@ -417,29 +415,18 @@ public:
 #else
         bool grayOnRight = !result;
 #endif
-        SDL_Rect grayRect = {
-          .x = static_cast<Sint16>(grayOnRight ? rendered->w >> 1 : 0),
-          .y = 0,
-          .w = static_cast<Uint16>(rendered->w >> 1),
-          .h = static_cast<Uint16>(rendered->h),
-        };
-        SDL_FillRect(rendered, &grayRect, 0xff404040U);
-        SDL_Rect blackRect = {
-          .x = static_cast<Sint16>(!grayOnRight ? rendered->w >> 1 : 0),
-          .y = 0,
-          .w = static_cast<Uint16>(rendered->w >> 1),
-          .h = static_cast<Uint16>(rendered->h),
-        };
-        SDL_FillRect(rendered, &blackRect, 0xff000000U);
+        rendered->fill(grayOnRight ? rendered->getWidth() >> 1 : 0, 0,
+            rendered->getWidth() >> 1, rendered->getHeight(), 0xff404040U);
+        rendered->fill(
+          !grayOnRight ? rendered->getWidth() >> 1 : 0,
+          0,
+          rendered->getWidth() >> 1,
+          rendered->getHeight(),
+          0xff000000U
+        );
       }
     }
-    SDL_Rect blackRect = {
-      .x = 0,
-      .y = 0,
-      .w = static_cast<Uint16>(rendered->w),
-      .h = static_cast<Uint16>(rendered->h),
-    };
-    SDL_FillRect(rendered, &blackRect, 0xff000000U);
+    rendered->fill(0xff000000U);
     return result;
   }
 };
@@ -592,22 +579,20 @@ void* ThreadLocals::renderThread() {
 }
 
 bool shouldQuit() {
-  static SDLKey lastKey;
+  static int lastKey;
   static Uint8 lastButton = ~0;
   SDL_Event event;
   while (SDL_PollEvent(&event)) {
     if (event.type == SDL_KEYUP) {
-      lastKey = event.key.keysym.sym;
-      std::cerr << "Key: " << SDL_GetKeyName(lastKey) << std::endl;
+      lastKey = keyCodeFromEvent(event);
     }
     if (event.type == SDL_JOYBUTTONUP) {
       lastButton = event.jbutton.button;
-      std::cerr << "Button: " << event.jbutton.button << std::endl;
     }
     if (event.type == SDL_QUIT ||
         event.type == SDL_JOYBUTTONDOWN && event.jbutton.button == lastButton ||
         event.type == SDL_KEYDOWN &&
-            (event.key.keysym.sym == SDLK_ESCAPE || event.key.keysym.sym == lastKey)) {
+            (event.key.keysym.sym == SDLK_ESCAPE || keyCodeFromEvent(event) == lastKey)) {
       return true;
     }
   }
